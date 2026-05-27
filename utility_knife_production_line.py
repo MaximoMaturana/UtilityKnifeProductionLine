@@ -14,8 +14,8 @@ Production flow:
     Makers (x4) → QC Stations (x4) → bins → AssemblyStation
                 → FinalInspection → Packaging
 
-Author : Maximo Maturana 
-Course : Advanced Programming G2 — SRH University Berlin
+Author : [Your Name]
+Course : Advanced Programming — SRH University Berlin
 Due    : June 20, 2026
 """
 
@@ -126,22 +126,64 @@ class Station(ABC):
 
 class ComponentMaker(Station):
     """
-    Manufactures one type of component.
-    Each unit gets a unique serial number; a small percentage is defective.
+    Manufactures one type of component with a realistic, drifting defect rate.
+
+    Defect-rate model
+    ──────────────────
+        effective_rate = base_rate + wear + batch_penalty   (capped at MAX_RATE)
+
+      • base_rate     — constant common-cause noise floor (never changes)
+      • wear          — special-cause drift; grows each part, reset by maintenance
+      • batch_penalty — temporary spike from a defective raw-material lot
+
+    This models two kinds of variation seen on real lines:
+      - common cause  : the inherent per-part randomness (base_rate)
+      - special cause : tool wear (gradual) and bad batches (sudden)
+
+    The CMMS resets accumulated wear by calling perform_maintenance().
     """
 
-    def __init__(self, component_name: str, defect_rate: float = 0.05) -> None:
+    WEAR_PER_PART = 0.0003   # how fast the tool degrades per part produced
+    MAX_RATE      = 0.40     # ceiling so the effective rate can't run away
+    BATCH_CHANCE  = 0.004    # probability per part that a bad batch begins
+    BATCH_LENGTH  = 20       # number of parts affected by one bad batch
+    BATCH_PENALTY = 0.15     # extra defect probability during a bad batch
+
+    def __init__(self, component_name: str, base_rate: float = 0.03) -> None:
         super().__init__(f"{component_name}Maker")
-        self.component_name = component_name
-        self.defect_rate    = defect_rate
-        self._counter       = 0
+        self.component_name   = component_name
+        self.base_rate        = base_rate     # common-cause floor
+        self.wear             = 0.0           # accumulated tool wear
+        self._batch_remaining = 0             # parts left in current bad batch
+        self._counter         = 0
+
+    @property
+    def current_defect_rate(self) -> float:
+        """Live effective defect probability (read by HMI / telemetry / CMMS)."""
+        batch = self.BATCH_PENALTY if self._batch_remaining > 0 else 0.0
+        return min(self.base_rate + self.wear + batch, self.MAX_RATE)
+
+    def perform_maintenance(self) -> None:
+        """Reset accumulated tool wear. Called by the CMMS on a work order."""
+        self.wear = 0.0
 
     def process(self, _ignored: object = None) -> Component:
         self._counter += 1
         self.processed_count += 1
+
+        # 1. tool wears a little with every part produced (special cause)
+        self.wear += self.WEAR_PER_PART
+
+        # 2. maybe a defective material batch starts, then counts down
+        if self._batch_remaining == 0 and random.random() < self.BATCH_CHANCE:
+            self._batch_remaining = self.BATCH_LENGTH
+        if self._batch_remaining > 0:
+            self._batch_remaining -= 1
+
+        # 3. roll against the *current* effective rate (common + special cause)
         quality = (
             Quality.DEFECTIVE
-            if random.random() < self.defect_rate
+            if random.random() < self.current_defect_rate
             else Quality.OK
         )
         return Component(
@@ -283,12 +325,14 @@ class ProductionLine:
     it coordinates but does not implement any station logic.
     """
 
-    # Component definitions: (name, defect_rate)
+    # Component definitions: (name, base_defect_rate)
+    # These are the common-cause floors; tool wear and bad batches push
+    # the effective rate above these values during a run.
     COMPONENTS = [
-        ("Handle",     0.05),
-        ("Blade",      0.06),   # slightly higher — precision steel cutting
-        ("LockSlider", 0.04),
-        ("BeltClip",   0.05),
+        ("Handle",     0.03),
+        ("Blade",      0.04),   # slightly higher — precision steel cutting
+        ("LockSlider", 0.02),
+        ("BeltClip",   0.03),
     ]
 
     def __init__(self) -> None:
@@ -305,7 +349,7 @@ class ProductionLine:
         self.makers: list[ComponentMaker]  = []
         self.qc_stations: list[QualityControl] = []
         for (name, rate), bin_ in zip(self.COMPONENTS, bins):
-            self.makers.append(ComponentMaker(name, defect_rate=rate))
+            self.makers.append(ComponentMaker(name, base_rate=rate))
             self.qc_stations.append(QualityControl(name))
 
         # Keep a reference to bins in order for easy iteration
@@ -385,7 +429,12 @@ class ProductionLine:
 
         print("\n── Component Makers ──")
         for s in self.makers:
-            print(s.report())
+            print(
+                f"{s.report()}  "
+                f"base={s.base_rate:.0%}  "
+                f"final_rate={s.current_defect_rate:.1%}  "
+                f"wear={s.wear:.3f}"
+            )
 
         print("\n── Quality Control ──")
         for s in self.qc_stations:

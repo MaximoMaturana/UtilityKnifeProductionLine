@@ -67,6 +67,7 @@ EVT_STAGE     = "stage"
 EVT_STATUS    = "status"
 EVT_STOPPED   = "stopped"
 EVT_RATES     = "rates"   # broadcasts randomised defect rates to sidebar
+EVT_STATS     = "stats"   # per-component produced / rejected snapshot
 
 # ══════════════════════════════════════════════════════════════════════
 #  INSTRUMENTED LINE
@@ -94,6 +95,13 @@ class InstrumentedLine:
             self._q.put({"type": EVT_STAGE, "stage": key, "component": comp})
             time.sleep(STEP_DELAY)
 
+    def _emit_stats(self):
+        """Send a per-component produced / rejected snapshot to the UI."""
+        self._q.put({"type": EVT_STATS, "stats": {
+            name: {"produced": self.makers[name].processed_count,
+                   "rejected": self.qcs[name].rejected_count}
+            for name, _ in self.COMPONENTS}})
+
     def _refill_bins(self):
         for name,_ in self.COMPONENTS:
             while not self.bins[name] and not self._stop.is_set():
@@ -109,6 +117,7 @@ class InstrumentedLine:
                 else:
                     self._stage(f"bin_{name}", name)
                     self.bins[name].append(passed)
+                self._emit_stats()   # refresh the per-component tab
 
     def _assemble_one(self):
         if self._stop.is_set(): return None
@@ -376,6 +385,34 @@ class HMI(tk.Tk):
         self._tree_rej.pack(side="left", fill="both", expand=True)
         sb_r.pack(side="right", fill="y")
 
+        # ── tab 3 : BY COMPONENT (live produced / rejected totals) ────
+        tab_stats = tk.Frame(nb, bg=TH["bg"])
+        nb.add(tab_stats, text="  ▦  BY COMPONENT  ")
+
+        stat_cols = ("Component", "Produced", "Rejected", "Passed", "Pass Rate")
+        wrap_t = tk.Frame(tab_stats, bg=TH["bg"])
+        wrap_t.pack(fill="both", expand=True)
+        self._tree_stats = ttk.Treeview(wrap_t, columns=stat_cols,
+                                        show="headings", style="X.Treeview",
+                                        height=6)
+        for col, w in zip(stat_cols, (140, 110, 110, 110, 120)):
+            self._tree_stats.heading(col, text=col)
+            self._tree_stats.column(col, width=w, anchor="center")
+        self._tree_stats.column("Component", anchor="w")
+        sb_t = ttk.Scrollbar(wrap_t, orient="vertical",
+                             command=self._tree_stats.yview)
+        self._tree_stats.configure(yscrollcommand=sb_t.set)
+        self._tree_stats.pack(side="left", fill="both", expand=True)
+        sb_t.pack(side="right", fill="y")
+
+        # pre-create one fixed row per component; updated in place via EVT_STATS
+        self._stat_rows = {}
+        for display, key in [("Handle","Handle"),("Blade","Blade"),
+                             ("Lock Slider","LockSlider"),("Belt Clip","BeltClip")]:
+            iid = self._tree_stats.insert("", "end",
+                values=(display, 0, 0, 0, "—"))
+            self._stat_rows[key] = iid
+
         tk.Frame(main, bg=TH["bg"], height=8).pack()
 
     # ── pipeline canvas ───────────────────────────────────────────────
@@ -471,6 +508,10 @@ class HMI(tk.Tk):
         self._yield_var.set("—")
         self._tree_shipped.delete(*self._tree_shipped.get_children())
         self._tree_rej.delete(*self._tree_rej.get_children())
+        # reset per-component totals to zero
+        for key, iid in self._stat_rows.items():
+            display = self._tree_stats.item(iid, "values")[0]
+            self._tree_stats.item(iid, values=(display, 0, 0, 0, "—"))
         # reset rate labels to "—" until EVT_RATES arrives
         for lbl in self._rate_labels.values():
             lbl.config(text="—")
@@ -507,6 +548,20 @@ class HMI(tk.Tk):
                                    else TH["warn"] if rate < 0.10
                                    else TH["danger"])
                             self._rate_labels[name].config(text=pct, fg=col)
+
+                elif t == EVT_STATS:
+                    # update the BY COMPONENT tab in place
+                    for key, vals in evt["stats"].items():
+                        iid = self._stat_rows.get(key)
+                        if iid is None:
+                            continue
+                        produced = vals["produced"]
+                        rejected = vals["rejected"]
+                        passed   = produced - rejected
+                        rate = f"{passed/produced*100:.1f}%" if produced else "—"
+                        display = self._tree_stats.item(iid, "values")[0]
+                        self._tree_stats.item(iid, values=(
+                            display, produced, rejected, passed, rate))
 
                 elif t == EVT_ASSEMBLED:
                     self._n_assembled += 1
