@@ -68,6 +68,95 @@ EVT_STATUS    = "status"
 EVT_STOPPED   = "stopped"
 EVT_RATES     = "rates"   # broadcasts randomised defect rates to sidebar
 EVT_STATS     = "stats"   # per-component produced / rejected snapshot
+EVT_TEMPS     = "temps"   # live temperature readings for both thermal zones
+EVT_FAULT     = "fault"   # thermal zone out of band — production paused
+
+# ══════════════════════════════════════════════════════════════════════
+#  THERMAL ZONE  (first-order model, same logic as producer.py)
+# ══════════════════════════════════════════════════════════════════════
+class ThermalZone:
+    """
+    First-order thermal model for one process zone.
+
+    The zone starts pre-heated exactly at its setpoint so production can
+    begin immediately.  The operator can toggle the heater ON/OFF at any
+    time via enable() / disable():
+
+      • Heater ON  → temperature tracks toward setpoint (normal operation)
+      • Heater OFF → temperature drifts toward ambient (cooling down)
+
+    A rare heater glitch (1 % / tick) pushes the zone above its upper band
+    and triggers a FAULT that pauses production until it cools back in band.
+
+    States
+    ------
+    COLD    — below  (setpoint − band)   heater off and cooled too far
+    HEATING — inside band, still climbing toward setpoint
+    OK      — within ±2 °C of setpoint (settled and producing)
+    FAULT   — above  (setpoint + band)   glitch or overheated
+    OFF     — heater disabled, temperature falling
+    """
+    GLITCH_CHANCE = 0.008  # 0.8 % per tick that a heater glitch fires
+    AMBIENT       = 22.0   # room temperature (°C)
+    COOL_TAU      = 0.0002 # cooling time constant — ~60 s to drop out of band,
+                           # mimicking real thermal inertia of a moulding barrel
+
+    def __init__(self, name: str, setpoint: float, band: float,
+                 tau: float = 0.06) -> None:
+        self.name     = name
+        self.setpoint = setpoint
+        self.band     = band
+        self._tau     = tau
+        # start pre-heated so production begins immediately
+        self._temp    = setpoint + random.gauss(0, 0.5)
+        self.enabled  = True          # heater state — operator-controlled
+
+    @property
+    def temperature(self) -> float:
+        return round(self._temp, 1)
+
+    @property
+    def status(self) -> str:
+        if not self.enabled:
+            return "OFF"
+        lo, hi = self.setpoint - self.band, self.setpoint + self.band
+        if self._temp < lo:
+            return "COLD"
+        if self._temp > hi:
+            return "FAULT"
+        if abs(self._temp - self.setpoint) <= 2.0:
+            return "OK"
+        return "HEATING"
+
+    @property
+    def in_band(self) -> bool:
+        """True when temperature is within the safe band (regardless of heater state).
+        Production resumes once temp is back in range even if heater was briefly off."""
+        lo, hi = self.setpoint - self.band, self.setpoint + self.band
+        return lo <= self._temp <= hi
+
+    def enable(self) -> None:
+        self.enabled = True
+
+    def disable(self) -> None:
+        self.enabled = False
+
+    def tick(self) -> None:
+        """Advance the thermal model one step."""
+        if self.enabled:
+            # rare heater glitch — spike above upper band
+            if random.random() < self.GLITCH_CHANCE:
+                self._temp += random.uniform(self.band * 1.1, self.band * 1.6)
+                return
+            # normal: ease toward setpoint with small noise
+            noise = random.gauss(0, 0.3)
+            self._temp += self._tau * (self.setpoint - self._temp) + noise
+        else:
+            # heater off: cool very slowly toward ambient (like a real oven)
+            noise = random.gauss(0, 0.05)
+            self._temp += self.COOL_TAU * (self.AMBIENT - self._temp) + noise
+        self._temp = max(self.AMBIENT, self._temp)
+
 
 # ══════════════════════════════════════════════════════════════════════
 #  INSTRUMENTED LINE
@@ -90,6 +179,12 @@ class InstrumentedLine:
         self.bins   = {n: collections.deque()  for n,_ in self.COMPONENTS}
         self.shipped: list[UtilityKnife] = []
 
+        # ── thermal zones ──────────────────────────────────────────────
+        self._zone_moulding = ThermalZone("Moulding Barrel",
+                                          setpoint=230.0, band=15.0)
+        self._zone_furnace  = ThermalZone("Heat-Treatment Furnace",
+                                          setpoint=820.0, band=40.0)
+
     def _stage(self, key, comp):
         if not self._stop.is_set():
             self._q.put({"type": EVT_STAGE, "stage": key, "component": comp})
@@ -102,9 +197,24 @@ class InstrumentedLine:
                    "rejected": self.qcs[name].rejected_count}
             for name, _ in self.COMPONENTS}})
 
+    def _emit_temps(self):
+        """Tick both thermal zones and push a temperature event to the UI."""
+        self._zone_moulding.tick()
+        self._zone_furnace.tick()
+        self._q.put({"type": EVT_TEMPS,
+            "moulding": {"temp":   self._zone_moulding.temperature,
+                         "status": self._zone_moulding.status,
+                         "in_band":self._zone_moulding.in_band},
+            "furnace":  {"temp":   self._zone_furnace.temperature,
+                         "status": self._zone_furnace.status,
+                         "in_band":self._zone_furnace.in_band}})
+
     def _refill_bins(self):
         for name,_ in self.COMPONENTS:
             while not self.bins[name] and not self._stop.is_set():
+                # pause if a thermal fault fires mid-production
+                if not self._both_in_band():
+                    return   # caller's loop will detect fault and handle it
                 self._stage(f"make_{name}", name)
                 part = self.makers[name].process()
                 self._stage(f"qc_{name}", name)
@@ -118,6 +228,7 @@ class InstrumentedLine:
                     self._stage(f"bin_{name}", name)
                     self.bins[name].append(passed)
                 self._emit_stats()   # refresh the per-component tab
+                self._emit_temps()   # refresh temperature gauges
 
     def _assemble_one(self):
         if self._stop.is_set(): return None
@@ -149,12 +260,52 @@ class InstrumentedLine:
                      "clip":   parts["BeltClip"].serial_number})
         return knife
 
+    def _both_in_band(self) -> bool:
+        """Production is allowed only when both heaters are ON and in band."""
+        return (self._zone_moulding.enabled and self._zone_moulding.in_band and
+                self._zone_furnace.enabled  and self._zone_furnace.in_band)
+
+    def toggle_moulding(self, enable: bool) -> None:
+        """Called from the UI thread — safe because bool assignment is atomic."""
+        if enable:
+            self._zone_moulding.enable()
+        else:
+            self._zone_moulding.disable()
+
+    def toggle_furnace(self, enable: bool) -> None:
+        if enable:
+            self._zone_furnace.enable()
+        else:
+            self._zone_furnace.disable()
+
     def run_until_stopped(self):
         self._q.put({"type": EVT_STATUS, "msg": "RUNNING", "ok": True})
+
         while not self._stop.is_set():
+            # emit temps every cycle so gauges stay live
+            self._emit_temps()
+
+            # mid-run thermal fault or heater-off check
+            if not self._both_in_band():
+                self._q.put({"type": EVT_STATUS,
+                             "msg": "FAULTED — thermal out of band", "ok": False})
+                self._q.put({"type": EVT_FAULT,
+                             "moulding_ok": self._zone_moulding.in_band,
+                             "furnace_ok":  self._zone_furnace.in_band})
+                # recovery loop: tick zones so temperature can climb back
+                # uses short sleeps so _stop_event is checked frequently
+                while not self._both_in_band() and not self._stop.is_set():
+                    self._emit_temps()   # this calls tick() on both zones
+                    time.sleep(0.15)     # short sleep → responsive to stop + heater toggle
+                if not self._stop.is_set():
+                    self._q.put({"type": EVT_STATUS, "msg": "RUNNING", "ok": True})
+                continue
+
             self._refill_bins()
-            if not self._stop.is_set():
+            if (not self._stop.is_set()
+                    and all(self.bins[n] for n, _ in self.COMPONENTS)):
                 self._assemble_one()
+
         self._q.put({"type": EVT_STATUS,
             "msg": f"STOPPED  •  {len(self.shipped)} knives shipped",
             "ok": False})
@@ -169,7 +320,9 @@ class HMI(tk.Tk):
         super().__init__()
         self.title("Utility Knife — Production HMI")
         self.configure(bg=TH["bg"])
-        self.resizable(False, False)
+        self.resizable(True, True)
+        self.minsize(1020, 820)
+        self.geometry("1100x860")
 
         self._q           = queue.Queue()
         self._stop_event  = threading.Event()
@@ -179,7 +332,11 @@ class HMI(tk.Tk):
         self._active_stage= None
         self._stage_items = {}
         self._blink_state = False
-        self._rate_labels : dict[str, tk.Label] = {}   # name → label widget
+        self._rate_labels      : dict[str, tk.Label]  = {}
+        self._temp_val_labels  : dict[str, tk.Label]  = {}
+        self._temp_stat_labels : dict[str, tk.Label]  = {}
+        self._heater_btns      : dict[str, tk.Button] = {}  # zone → toggle btn
+        self._line             : InstrumentedLine | None = None  # running line ref
 
         self._build_ui()
         self._poll()
@@ -293,15 +450,66 @@ class HMI(tk.Tk):
         main = tk.Frame(parent, bg=TH["bg"])
         main.pack(side="left", fill="both", expand=True)
 
-        # stat cards
-        cards_row = tk.Frame(main, bg=TH["bg"], padx=10)
-        cards_row.pack(fill="x")
+        # ── top info band: stat cards + temp gauges side by side ──────
+        top_band = tk.Frame(main, bg=TH["bg"], padx=10)
+        top_band.pack(fill="x", side="top")
+
         self._assembled_var = tk.StringVar(value="0")
         self._rejected_var  = tk.StringVar(value="0")
         self._yield_var     = tk.StringVar(value="—")
-        self._stat_card(cards_row, "KNIVES SHIPPED", self._assembled_var, TH["accent"])
-        self._stat_card(cards_row, "TOTAL REJECTS",  self._rejected_var,  TH["danger"])
-        self._stat_card(cards_row, "YIELD RATE",     self._yield_var,     TH["accent2"])
+        self._stat_card(top_band, "KNIVES SHIPPED", self._assembled_var, TH["accent"])
+        self._stat_card(top_band, "TOTAL REJECTS",  self._rejected_var,  TH["danger"])
+        self._stat_card(top_band, "YIELD RATE",     self._yield_var,     TH["accent2"])
+
+        # vertical divider between stat cards and temp gauges
+        tk.Frame(top_band, bg=TH["sep"], width=1).pack(
+            side="left", fill="y", padx=(10, 0), pady=8)
+
+        # temperature gauge cards with heater ON/OFF toggle
+        for zone_key, title, sp_text in [
+            ("moulding", "MOULDING BARREL",      "SP 230 °C"),
+            ("furnace",  "HEAT-TREAT FURNACE",   "SP 820 °C"),
+        ]:
+            card = tk.Frame(top_band, bg=TH["card"],
+                            highlightbackground=TH["card_border"],
+                            highlightthickness=1, padx=12, pady=8)
+            card.pack(side="left", padx=6, pady=8)
+
+            # header row: title + setpoint
+            hdr = tk.Frame(card, bg=TH["card"])
+            hdr.pack(fill="x")
+            tk.Label(hdr, text=title, bg=TH["card"], fg=TH["fg_dim"],
+                     font=("Segoe UI",7,"bold")).pack(side="left")
+            tk.Label(hdr, text=sp_text, bg=TH["card"], fg=TH["fg_dim"],
+                     font=("Segoe UI",7), padx=8).pack(side="left")
+
+            # live temperature value
+            val_lbl = tk.Label(card, text="— °C", bg=TH["card"],
+                               fg=TH["accent2"],
+                               font=("Segoe UI",20,"bold"), anchor="w")
+            val_lbl.pack(anchor="w")
+
+            # bottom row: status word + heater toggle button
+            bot = tk.Frame(card, bg=TH["card"])
+            bot.pack(fill="x", pady=(2,0))
+
+            stat_lbl = tk.Label(bot, text="READY", bg=TH["card"],
+                                fg=TH["accent"],
+                                font=("Segoe UI",8,"bold"), anchor="w")
+            stat_lbl.pack(side="left")
+
+            # heater toggle — starts ON (zones are pre-heated)
+            zk = zone_key   # capture loop variable
+            btn = tk.Button(bot, text="🔥 ON", bg=TH["accent"], fg="#0F1117",
+                            font=("Segoe UI",7,"bold"), relief="flat",
+                            cursor="hand2", padx=6, pady=2, bd=0,
+                            highlightthickness=0,
+                            command=lambda z=zk: self._toggle_heater(z))
+            btn.pack(side="right")
+
+            self._temp_val_labels[zone_key]  = val_lbl
+            self._temp_stat_labels[zone_key] = stat_lbl
+            self._heater_btns[zone_key]      = btn
 
         self._sep(main)
 
@@ -320,7 +528,7 @@ class HMI(tk.Tk):
 
         # ── tabbed log panel ──────────────────────────────────────────
         log_area = tk.Frame(main, bg=TH["bg"], padx=14, pady=6)
-        log_area.pack(fill="both", expand=True)
+        log_area.pack(fill="both", expand=False)
 
         style = ttk.Style(self)
         style.theme_use("default")
@@ -498,9 +706,37 @@ class HMI(tk.Tk):
         total = self._n_assembled + self._n_rejected
         self._yield_var.set(f"{int(self._n_assembled/total*100)}%" if total else "—")
 
+    # ── heater toggle ─────────────────────────────────────────────────
+    def _toggle_heater(self, zone_key: str) -> None:
+        """Flip the heater for the given zone ON↔OFF and update the button."""
+        if self._line is None:
+            return   # no line running — button does nothing
+        btn = self._heater_btns[zone_key]
+        currently_on = (btn.cget("text") == "🔥 ON")
+        if currently_on:
+            # turn OFF
+            if zone_key == "moulding":
+                self._line.toggle_moulding(False)
+            else:
+                self._line.toggle_furnace(False)
+            btn.config(text="❄  OFF", bg=TH["danger"], fg="#fff")
+        else:
+            # turn ON
+            if zone_key == "moulding":
+                self._line.toggle_moulding(True)
+            else:
+                self._line.toggle_furnace(True)
+            btn.config(text="🔥 ON", bg=TH["accent"], fg="#0F1117")
+
     # ── controls ─────────────────────────────────────────────────────
     def _start(self):
-        if self._thread and self._thread.is_alive(): return
+        # if a thread is still alive (stuck in recovery), stop it and wait
+        if self._thread and self._thread.is_alive():
+            self._stop_event.set()
+            self._thread.join(timeout=2.0)
+            if self._thread.is_alive():
+                return   # give up if it won't exit
+
         self._n_assembled = 0
         self._n_rejected  = 0
         self._assembled_var.set("0")
@@ -508,19 +744,22 @@ class HMI(tk.Tk):
         self._yield_var.set("—")
         self._tree_shipped.delete(*self._tree_shipped.get_children())
         self._tree_rej.delete(*self._tree_rej.get_children())
-        # reset per-component totals to zero
         for key, iid in self._stat_rows.items():
             display = self._tree_stats.item(iid, "values")[0]
             self._tree_stats.item(iid, values=(display, 0, 0, 0, "—"))
-        # reset rate labels to "—" until EVT_RATES arrives
         for lbl in self._rate_labels.values():
             lbl.config(text="—")
+        for lbl in self._temp_val_labels.values():
+            lbl.config(text="— °C", fg=TH["accent2"])
+        for lbl in self._temp_stat_labels.values():
+            lbl.config(text="READY", fg=TH["accent"])
+        for btn in self._heater_btns.values():
+            btn.config(text="🔥 ON", bg=TH["accent"], fg="#0F1117")
         self._reset_pipeline()
         self._stop_event.clear()
-        # no fixed seed → truly random rates each run
-        line = InstrumentedLine(self._q, self._stop_event)
+        self._line = InstrumentedLine(self._q, self._stop_event)
         self._thread = threading.Thread(
-            target=line.run_until_stopped, daemon=True)
+            target=self._line.run_until_stopped, daemon=True)
         self._thread.start()
         self._btn_start.config(state="disabled")
         self._btn_stop.config(state="normal")
@@ -591,12 +830,48 @@ class HMI(tk.Tk):
 
                 elif t == EVT_STATUS:
                     self._status_var.set(evt["msg"])
-                    self._status_dot.config(
-                        fg=TH["accent"] if evt.get("ok") else TH["fg_dim"])
+                    msg = evt["msg"]
+                    if evt.get("ok"):
+                        dot_col = TH["accent"]       # green — running
+                    elif "HEAT" in msg:
+                        dot_col = TH["warn"]         # amber — heating up
+                    elif "FAULT" in msg:
+                        dot_col = TH["danger"]       # red — faulted
+                    else:
+                        dot_col = TH["fg_dim"]       # dim — idle/stopped
+                    self._status_dot.config(fg=dot_col)
+
+                elif t == EVT_FAULT:
+                    # highlight which zone is out of band in the temp cards
+                    for zone_key, ok_key in [("moulding","moulding_ok"),
+                                             ("furnace","furnace_ok")]:
+                        if not evt[ok_key]:
+                            self._temp_stat_labels[zone_key].config(
+                                text="FAULT", fg=TH["danger"])
 
                 elif t == EVT_STOPPED:
                     self._reset_pipeline()
+                    self._line = None
+                    for btn in self._heater_btns.values():
+                        btn.config(text="🔥 ON", bg=TH["accent"], fg="#0F1117")
                     self._btn_start.config(state="normal")
+
+                elif t == EVT_TEMPS:
+                    _status_colour = {
+                        "COLD":    TH["fg_dim"],
+                        "HEATING": TH["warn"],
+                        "OK":      TH["accent"],
+                        "FAULT":   TH["danger"],
+                        "OFF":     TH["danger"],
+                    }
+                    for zone_key in ("moulding", "furnace"):
+                        data   = evt[zone_key]
+                        status = data["status"]
+                        col    = _status_colour.get(status, TH["fg_dim"])
+                        self._temp_val_labels[zone_key].config(
+                            text=f"{data['temp']:.1f} °C", fg=col)
+                        self._temp_stat_labels[zone_key].config(
+                            text=status, fg=col)
 
         except queue.Empty:
             pass
