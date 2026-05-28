@@ -495,4 +495,4 @@ Data in InfluxDB and Grafana is stored in Docker volumes and will persist the ne
 
 ---
 
-*SRH University Berlin — Advanced Programming, Applied Mechatronics, June 2026*
+*SRH University Berlin — Advanced Programming G2, Applied Mechatronics, June 2026*
