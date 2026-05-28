@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.env
+
+work_orders.json
+parts.json
+cmms.sqlite3
