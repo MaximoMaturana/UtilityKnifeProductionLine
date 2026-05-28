@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="page-header">
+    <div>
+        <h2>Maintenance Alerts</h2>
+        <p>Live alerts generated from wear and defect-rate telemetry</p>
+    </div>
+</div>
+
+<section class="panel">
+    {% if alerts %}
+        <div class="alerts-list">
+            {% for alert in alerts %}
+            <div class="alert-card {{ alert.css_class }}">
+                <div>
+                    <strong>{{ alert.level }}</strong>
+                    <h3>{{ alert.station }}</h3>
+                    <p>{{ alert.message }}</p>
+                    <span>{{ alert.recommendation }}</span>
+                </div>
+
+                <form method="post" action="{{ url_for('create_order') }}">
+                    <input type="hidden" name="station" value="{{ alert.station }}">
+                    <input type="hidden" name="priority" value="{% if alert.level == 'CRITICAL' %}HIGH{% else %}MEDIUM{% endif %}">
+                    <input type="hidden" name="requested_by" value="CMMS Alert System">
+                    <input type="hidden" name="assigned_to" value="Maintenance Team">
+                    <input type="hidden" name="notes" value="{{ alert.recommendation }}">
+                    <input type="hidden" name="reason" value="{{ alert.message }}">
+                    <button class="small-btn" type="submit">Create Work Order</button>
+                </form>
+            </div>
+            {% endfor %}
+        </div>
+    {% else %}
+        <div class="empty success-empty">
+            No active alerts. All stations are currently within the maintenance limits.
+        </div>
+    {% endif %}
+</section>
+{% endblock %}

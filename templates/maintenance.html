@@ -1,0 +1,129 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="page-header">
+    <div>
+        <h2>Maintenance Schedule</h2>
+        <p>Planned and corrective maintenance for production stations</p>
+    </div>
+</div>
+
+<section class="panel">
+    <h3>Scheduled Maintenance</h3>
+
+    <table>       
+        <thead>
+            <tr>
+                <th>Machine</th>
+                <th>Task</th>
+                <th>Last Done</th>
+                <th>Next Due</th>
+                <th>Frequency</th>
+                <th>Changed By</th>
+                <th>Notes</th>
+                <th>Status</th>
+            </tr>
+        </thead>
+
+        <tbody>
+            {% for item in schedule %}
+            <tr>
+                <td><strong>{{ item.machine }}</strong></td>
+                <td>{{ item.task }}</td>
+                <td>{{ item.last_done }}</td>
+                <td>{{ item.next_due }}</td>
+                <td>{{ item.frequency }}</td>
+                <td>{{ item.changed_by }}</td>
+                <td>{{ item.notes }}</td>
+                <td><span class="badge {{ item.css_class }}">{{ item.status }}</span></td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</section>
+
+<section class="panel">
+    <h3>Open Work Orders</h3>
+
+    {% if open_orders %}
+    <table>
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>Machine</th>
+                <th>Reason</th>
+                <th>Priority</th>
+                <th>Requested By</th>
+                <th>Assigned To</th>
+                <th>Notes</th>
+                <th>Created</th>
+                <th>Action</th>
+            </tr>
+        </thead>
+
+        <tbody>
+            {% for order in open_orders %}
+            <tr>
+                <td>#{{ order.id }}</td>
+                <td>{{ order.machine }}</td>
+                <td>{{ order.reason }}</td>
+                <td>{{ order.priority }}</td>
+                <td>{{ order.requested_by }}</td>
+                <td>{{ order.assigned_to }}</td>
+                <td>{{ order.notes }}</td>
+                <td>{{ order.created_at }}</td>
+                <td>
+                    <form method="post" action="{{ url_for('close_order', order_id=order.id) }}">
+                        <input class="mini-input" type="text" name="closing_notes" placeholder="Closing note">
+                        <button class="small-btn green-btn" type="submit">Close</button>
+                    </form>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <div class="empty">No open work orders.</div>
+    {% endif %}
+</section>
+
+<section class="panel">
+    <h3>Closed Work Orders</h3>
+
+    {% if closed_orders %}
+    <table>
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>Machine</th>
+                <th>Reason</th>
+                <th>Priority</th>
+                <th>Created</th>
+                <th>Closed</th>
+                <th>Requested By</th>
+                <th>Assigned To</th>
+                <th>Notes</th>
+            </tr>
+        </thead>
+
+        <tbody>
+            {% for order in closed_orders %}
+            <tr>
+                <td>#{{ order.id }}</td>
+                <td>{{ order.machine }}</td>
+                <td>{{ order.reason }}</td>
+                <td>{{ order.priority }}</td>
+                <td>{{ order.created_at }}</td>
+                <td>{{ order.closed_at }}</td>
+                <td>{{ order.requested_by }}</td>
+                <td>{{ order.assigned_to }}</td>
+                <td>{{ order.notes }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <div class="empty">No closed work orders yet.</div>
+    {% endif %}
+</section>
+{% endblock %}

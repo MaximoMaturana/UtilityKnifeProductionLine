@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Utility Knife CMMS</title>
+
+    {% block extra_head %}{% endblock %}
+
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/cmms.css') }}">
+</head>
+
+<body>
+    <header class="topbar">
+        <div class="brand">
+            <div class="brand-mark">⌧</div>
+            <div>
+                <h1>UTILITY KNIFE CMMS</h1>
+                <p>Maintenance Management System • Live Production Monitoring</p>
+            </div>
+        </div>
+
+        <nav>
+            <a href="{{ url_for('dashboard') }}" class="{% if active_page == 'dashboard' %}active{% endif %}">Dashboard</a>
+            <a href="{{ url_for('parts') }}" class="{% if active_page == 'parts' %}active{% endif %}">Parts</a>
+            <a href="{{ url_for('maintenance') }}" class="{% if active_page == 'maintenance' %}active{% endif %}">Maintenance</a>
+            <a href="{{ url_for('alerts') }}" class="{% if active_page == 'alerts' %}active{% endif %}">Alerts</a>
+        </nav>
+    </header>
+
+    <main class="page">
+        {% block content %}{% endblock %}
+    </main>
+
+    <footer>
+        © 2026 Utility Knife Production Line — CMMS System
+    </footer>
+
+    <script src="{{ url_for('static', filename='js/cmms.js') }}"></script>
+</body>
+</html>

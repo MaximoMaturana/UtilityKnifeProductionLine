@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="form-wrapper">
+    <form class="form-card" method="post" action="{{ url_for('add_part_route') }}">
+        <h2>Add Machine Spare Part</h2>
+        <p>Register a spare part used to maintain the production machines.</p>
+
+        <label>Part Name *</label>
+        <input type="text" name="name" placeholder="e.g., Heater Cartridge" required>
+
+        <label>Description</label>
+        <textarea name="description" placeholder="Detailed description of the spare part"></textarea>
+
+        <label>Machine / Location *</label>
+        <select name="machine" required>
+            <option value="Moulding Barrel">Moulding Barrel</option>
+            <option value="Heat-Treat Furnace">Heat-Treat Furnace</option>
+            <option value="Blade Cutting Station">Blade Cutting Station</option>
+            <option value="Lock Slider Assembly Press">Lock Slider Assembly Press</option>
+            <option value="Belt Clip Forming Press">Belt Clip Forming Press</option>
+        </select>
+
+        <label>Part Number *</label>
+        <input type="text" name="part_number" placeholder="e.g., MB-HEAT-001" required>
+
+        <label>Quantity in Stock *</label>
+        <input type="number" name="quantity" min="0" value="1" required>
+
+        <label>Supplier</label>
+        <input type="text" name="supplier" placeholder="e.g., SRH Demo Supplier">
+
+        <div class="button-row">
+            <button class="primary-btn" type="submit">Add Spare Part</button>
+            <a class="secondary-btn" href="{{ url_for('parts') }}">Cancel</a>
+        </div>
+    </form>
+</div>
+{% endblock %}

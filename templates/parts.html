@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="page-header">
+    <div>
+        <h2>Spare Parts Inventory</h2>
+        <p>Machine parts used for maintenance of the utility knife production line</p>
+    </div>
+
+    <a class="primary-btn" href="{{ url_for('add_part_route') }}">+ Add Spare Part</a>
+</div>
+
+<section class="panel">
+    <table>
+        <thead>
+            <tr>
+                <th>Spare Part</th>
+                <th>Description</th>
+                <th>Machine</th>
+                <th>Part Number</th>
+                <th>Qty</th>
+                <th>Supplier</th>
+            </tr>
+        </thead>
+
+        <tbody>
+            {% for part in parts %}
+            <tr>
+                <td><strong>{{ part.name }}</strong></td>
+                <td>{{ part.description }}</td>
+                <td>{{ part.machine }}</td>
+                <td>{{ part.part_number }}</td>
+                <td>{{ part.quantity }}</td>
+                <td>{{ part.supplier }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</section>
+{% endblock %}

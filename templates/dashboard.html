@@ -1,0 +1,176 @@
+{% extends "base.html" %}
+
+
+{% block content %}
+
+<section class="hero-panel">
+    <div>
+        <h2>Maintenance Dashboard</h2>
+        <p>Live CMMS overview for the Utility Knife Production Line</p>
+    </div>
+
+    <div class="machine-state {{ line.state|lower }}" id="machine-state">
+        <span class="pulse-dot"></span>
+        {{ line.state }}
+    </div>
+</section>
+
+<section class="live-grid">
+    <div class="live-card temp-card">
+        <h3>Moulding Barrel</h3>
+        <div class="big-value" id="temp-moulding">{{ "%.1f"|format(line.temp_moulding or 0) }}</div>
+        <span>°C</span>
+        <p>Target: 230 °C • Handle injection moulding</p>
+    </div>
+
+
+    <div class="live-card temp-card">
+        <h3>Heat-Treat Furnace</h3>
+        <div class="big-value" id="temp-furnace">{{ "%.1f"|format(line.temp_furnace or 0) }}</div>
+        <span>°C</span>
+        <p>Target: 820 °C • Blade heat-treatment</p>
+    </div>
+
+    <div class="live-card blue-card">
+        <h3>Parts Produced</h3>
+        <div class="big-value" id="parts-produced">{{ line.parts_produced or 0 }}</div>
+        <p>Total components manufactured</p>
+    </div>
+
+    <div class="live-card red-card">
+        <h3>Rejected Parts</h3>
+        <div class="big-value" id="parts-rejected">{{ line.parts_rejected or 0 }}</div>
+        <p>Rejected by QC or assembly</p>
+    </div>
+
+    <div class="live-card amber-card">
+        <h3>Maintenance Events</h3>
+        <div class="big-value" id="maintenance-count">{{ line.maintenance_count or 0 }}</div>
+        <p>Automatic CMMS events</p>
+    </div>
+</section>
+
+<section class="panel">
+    <div class="panel-header">
+        <div>
+            <h3>Machine Condition</h3>
+            <p>Station wear, defect rate, and live maintenance condition</p>
+        </div>
+
+        <a class="ghost-link" href="{{ url_for('alerts') }}">View alerts →</a>
+    </div>
+
+    <div class="station-grid">
+        {% for s in stations %}
+        <div class="station-card {{ s.css_class }}">
+            <div class="station-header">
+                <h4>{{ s.display_name }}</h4>
+                <span class="badge {{ s.css_class }}">{{ s.condition }}</span>
+            </div>
+
+            <div class="station-metric">
+                <span>Tool wear</span>
+                <strong>{{ "%.2f"|format(s.wear_pct) }}%</strong>
+            </div>
+
+            <div class="bar">
+                <div class="bar-fill {{ s.css_class }}" style="width: {{ [s.wear_pct, 100]|min }}%;"></div>
+            </div>
+
+            <div class="station-metric">
+                <span>Defect rate</span>
+                <strong>{{ "%.1f"|format(s.defect_pct) }}%</strong>
+            </div>
+
+            <div class="bar">
+                <div class="bar-fill {{ s.css_class }}" style="width: {{ [s.defect_pct, 100]|min }}%;"></div>
+            </div>
+
+            <div class="station-metric">
+                <span>Priority</span>
+                <strong>{{ s.priority }}</strong>
+            </div>
+
+            <form method="post" action="{{ url_for('create_order') }}">
+
+                <label class="mini-label">Requested by</label>
+<input class="mini-input" type="text" name="requested_by" value="Operator">
+
+<label class="mini-label">Assigned to</label>
+<input class="mini-input" type="text" name="assigned_to" value="Maintenance Team">
+
+<label class="mini-label">Notes</label>
+<textarea class="mini-textarea" name="notes" placeholder="Optional notes for this work order"></textarea>
+                <input type="hidden" name="station" value="{{ s.display_name }}">
+                <input type="hidden" name="priority" value="{{ s.priority }}">
+                <input type="hidden" name="reason"
+                       value="Inspection required. Wear={{ '%.3f'|format(s.wear) }}, defect rate={{ '%.3f'|format(s.defect_rate) }}">
+                <button class="station-btn" type="submit">Create Work Order</button>
+            </form>
+        </div>
+        {% endfor %}
+    </div>
+</section>
+
+<section class="dashboard-bottom">
+    <div class="panel">
+        <div class="panel-header">
+            <div>
+                <h3>Maintenance Summary</h3>
+                <p>Planning overview from the CMMS schedule</p>
+            </div>
+            <a class="ghost-link" href="{{ url_for('maintenance') }}">Open schedule →</a>
+        </div>
+
+        <div class="summary-strip">
+            <div>
+                <span>Total Parts</span>
+                <strong>{{ total_parts }}</strong>
+            </div>
+
+            <div>
+                <span>Overdue</span>
+                <strong class="danger-text">{{ overdue_count }}</strong>
+            </div>
+
+            <div>
+                <span>Upcoming</span>
+                <strong class="warn-text">{{ upcoming_count }}</strong>
+            </div>
+
+            <div>
+                <span>Open Orders</span>
+                <strong>{{ open_orders|length }}</strong>
+            </div>
+        </div>
+    </div>
+
+    <div class="panel">
+        <div class="panel-header">
+            <div>
+                <h3>Open Work Orders</h3>
+                <p>Active maintenance tasks</p>
+            </div>
+            <a class="ghost-link" href="{{ url_for('maintenance') }}">Manage →</a>
+        </div>
+
+        {% if open_orders %}
+        <div class="mini-order-list">
+            {% for order in open_orders[:4] %}
+            <div class="mini-order">
+                <strong>#{{ order.id }} — {{ order.machine }}</strong>
+                <span>{{ order.priority }} • {{ order.created_at }}</span>
+            </div>
+            {% endfor %}
+        </div>
+        {% else %}
+        <div class="empty dark-empty">No open work orders.</div>
+        {% endif %}
+    </div>
+</section>
+
+<p class="refresh-note">
+    Dashboard auto-refreshes every 5 seconds while producer.py is running.
+</p>
+
+{% endblock %}
