@@ -54,6 +54,12 @@ INFLUX_BUCKET = "production"
 
 WRITE_INTERVAL = 1.0   # seconds between InfluxDB write batches
 
+# ── CMMS settings ────────────────────────────────────────────────────
+# These limits are intentionally not too high, so maintenance events
+# appear during a short demo in Grafana.
+CMMS_WEAR_LIMIT   = 0.10   # maintenance when tool wear reaches this value
+CMMS_DEFECT_LIMIT = 0.22   # maintenance when defect rate becomes too high
+CMMS_COOLDOWN     = 15     # wait this many checks before same station can retrigger
 
 # ══════════════════════════════════════════════════════════════════════
 #  THERMAL ZONE  (identical model to utility_knife_hmi.py)
@@ -146,6 +152,22 @@ class LineRunner:
 
         self.state = STATE_IDLE
 
+                # ── CMMS / maintenance tracking ───────────────────────────────
+        self.maintenance_count = 0
+        self.maintenance_event = 0          # 1 only when maintenance happened
+        self.maintenance_station = "None"
+        self.maintenance_reason_code = 0    # 0 none, 1 wear, 2 defect rate
+
+        self._station_codes = {
+            "None": 0,
+            "Handle": 1,
+            "Blade": 2,
+            "LockSlider": 3,
+            "BeltClip": 4,
+        }
+
+        self._cmms_cooldown = {name: 0 for name in self.BASE_NAMES}
+
     # ── thermal helpers ────────────────────────────────────────────────
     def _both_in_band(self) -> bool:
         return self.zone_moulding.in_band and self.zone_furnace.in_band
@@ -153,6 +175,66 @@ class LineRunner:
     def _tick_thermal(self) -> None:
         self.zone_moulding.tick()
         self.zone_furnace.tick()
+
+        # ── CMMS helpers ─────────────────────────────────────────────────
+    def check_cmms(self) -> None:
+        """
+        Simple Computerized Maintenance Management System.
+
+        The CMMS monitors each component maker. If tool wear or defect rate
+        becomes too high, it creates a maintenance event and resets the
+        tool wear by calling perform_maintenance().
+        """
+        # Default: no new maintenance event this cycle
+        self.maintenance_event = 0
+        self.maintenance_station = "None"
+        self.maintenance_reason_code = 0
+
+        # Reduce cooldown timers
+        for name in self.BASE_NAMES:
+            if self._cmms_cooldown[name] > 0:
+                self._cmms_cooldown[name] -= 1
+
+        # Check every station
+        for name in self.BASE_NAMES:
+            maker = self.makers[name]
+
+            if self._cmms_cooldown[name] > 0:
+                continue
+
+            wear = maker.wear
+            defect_rate = maker.current_defect_rate
+
+            reason_code = 0
+
+            if wear >= CMMS_WEAR_LIMIT:
+                reason_code = 1     # preventive maintenance: tool wear
+            elif defect_rate >= CMMS_DEFECT_LIMIT:
+                reason_code = 2     # corrective maintenance: defect rate
+
+            if reason_code == 0:
+                continue
+
+            # Create one maintenance event
+            self.maintenance_count += 1
+            self.maintenance_event = 1
+            self.maintenance_station = name
+            self.maintenance_reason_code = reason_code
+
+            # Perform maintenance: reset accumulated tool wear
+            maker.perform_maintenance()
+
+            # Prevent the same station from instantly retriggering
+            self._cmms_cooldown[name] = CMMS_COOLDOWN
+
+            print(
+                f"[CMMS] Maintenance #{self.maintenance_count} on {name} "
+                f"(reason={reason_code}, wear={wear:.3f}, "
+                f"defect_rate={defect_rate:.1%})"
+            )
+
+            # Only one maintenance event per check cycle
+            break
 
     # ── one production step ────────────────────────────────────────────
     def step(self) -> None:
@@ -210,17 +292,28 @@ class LineRunner:
             name: {
                 "defect_rate": self.makers[name].current_defect_rate,
                 "wear":        self.makers[name].wear,
+                "needs_maintenance": int(
+                    self.makers[name].wear >= CMMS_WEAR_LIMIT
+                    or self.makers[name].current_defect_rate >= CMMS_DEFECT_LIMIT
+                ),
             }
             for name in self.BASE_NAMES
         }
         return {
-            "state":          self.state,
-            "temp_moulding":  self.zone_moulding.temperature,
-            "temp_furnace":   self.zone_furnace.temperature,
-            "parts_produced": self.parts_produced,
-            "parts_shipped":  self.parts_shipped,
-            "parts_rejected": self.parts_rejected,
-            "per_station":    per_station,
+            "state":                    self.state,
+            "temp_moulding":            self.zone_moulding.temperature,
+            "temp_furnace":             self.zone_furnace.temperature,
+            "parts_produced":           self.parts_produced,
+            "parts_shipped":            self.parts_shipped,
+            "parts_rejected":           self.parts_rejected,
+
+            # CMMS metrics
+            "maintenance_count":        self.maintenance_count,
+            "maintenance_event":        self.maintenance_event,
+            "maintenance_station_code": self._station_codes[self.maintenance_station],
+            "maintenance_reason_code":  self.maintenance_reason_code,
+
+            "per_station":              per_station,
         }
 
 
@@ -236,6 +329,7 @@ def print_snapshot(tick: int, snap: dict) -> None:
         f"produced={snap['parts_produced']:<4}  "
         f"shipped={snap['parts_shipped']:<4}  "
         f"rejected={snap['parts_rejected']:<4}"
+        f"maint={snap['maintenance_count']:<3}"
     )
 
 
@@ -257,12 +351,19 @@ def build_points(snap: dict, timestamp) -> list:
     # ── main line metrics ─────────────────────────────────────────────
     p = (
         Point("line")
-        .field("state",          snap["state"])
-        .field("temp_moulding",  float(snap["temp_moulding"]))
-        .field("temp_furnace",   float(snap["temp_furnace"]))
-        .field("parts_produced", snap["parts_produced"])
-        .field("parts_shipped",  snap["parts_shipped"])
-        .field("parts_rejected", snap["parts_rejected"])
+        .field("state",                    snap["state"])
+        .field("temp_moulding",            float(snap["temp_moulding"]))
+        .field("temp_furnace",             float(snap["temp_furnace"]))
+        .field("parts_produced",           snap["parts_produced"])
+        .field("parts_shipped",            snap["parts_shipped"])
+        .field("parts_rejected",           snap["parts_rejected"])
+
+        # CMMS fields
+        .field("maintenance_count",        snap["maintenance_count"])
+        .field("maintenance_event",        snap["maintenance_event"])
+        .field("maintenance_station_code", snap["maintenance_station_code"])
+        .field("maintenance_reason_code",  snap["maintenance_reason_code"])
+
         .time(timestamp)
     )
     points.append(p)
@@ -274,6 +375,7 @@ def build_points(snap: dict, timestamp) -> list:
             .tag("station",    station)
             .field("defect_rate", float(vals["defect_rate"]))
             .field("wear",        float(vals["wear"]))
+            .field("needs_maintenance", int(vals["needs_maintenance"]))
             .time(timestamp)
         )
         points.append(ps)
@@ -296,6 +398,7 @@ def run_producer(dry_run: bool = False) -> None:
         try:
             while True:
                 runner.step()
+                runner.check_cmms()
                 tick += 1
                 if tick % 5 == 0:   # print every 5 ticks to avoid flooding
                     print_snapshot(tick, runner.snapshot())
@@ -326,6 +429,8 @@ def run_producer(dry_run: bool = False) -> None:
             # run several steps per write interval for smoother simulation
             for _ in range(5):
                 runner.step()
+
+            runner.check_cmms()
 
             tick += 1
             snap = runner.snapshot()
